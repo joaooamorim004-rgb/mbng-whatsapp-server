@@ -1,7 +1,6 @@
 {
   "name": "mbng-whatsapp-server",
   "version": "1.0.0",
-  "description": "WhatsApp Server for MBNG using Baileys",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -11,8 +10,5 @@
     "@supabase/supabase-js": "^2.81.1",
     "express": "^4.18.2",
     "cors": "^2.8.5"
-  },
-  "engines": {
-    "node": ">=18.0.0"
   }
 }
