@@ -22,14 +22,11 @@ console.log('✅ Supabase configurado');
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 const logger = pino({ level: 'silent' });
 
-// Armazena as conexões ativas
 const connections = new Map();
 
-// Função para criar conexão WhatsApp (baseada na Evolution API)
 async function createWhatsAppConnection(clienteId) {
   console.log('🔄 Iniciando conexão WhatsApp para cliente:', clienteId);
   
-  // Se já existe uma conexão ativa, retornar o QR se disponível
   if (connections.has(clienteId)) {
     const existing = connections.get(clienteId);
     if (existing.qr) {
@@ -43,18 +40,15 @@ async function createWhatsAppConnection(clienteId) {
     const authDir = path.join(__dirname, 'auth_sessions', clienteId);
 
     try {
-      // Criar diretório de sessão se não existir
       if (!fs.existsSync(authDir)) {
         fs.mkdirSync(authDir, { recursive: true });
       }
 
-      // Usar auth state com arquivos (padrão Evolution API)
       const { state, saveCreds } = await useMultiFileAuthState(authDir);
       const { version } = await fetchLatestBaileysVersion();
       
       console.log('📦 Baileys version:', version);
 
-      // Criar socket (padrão Evolution API)
       const sock = makeWASocket({
         version,
         logger,
@@ -67,18 +61,14 @@ async function createWhatsAppConnection(clienteId) {
         getMessage: async () => undefined
       });
 
-      // Salvar conexão
       const connData = { sock, qr: null, connected: false };
       connections.set(clienteId, connData);
 
-      // Evento: Atualização de credenciais
       sock.ev.on('creds.update', saveCreds);
 
-      // Evento: Atualização de conexão (CRÍTICO)
       sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        // QR Code gerado - RESPONDER IMEDIATAMENTE
         if (qr && !resolved) {
           console.log('📱 QR Code gerado!');
           connData.qr = qr;
@@ -86,19 +76,16 @@ async function createWhatsAppConnection(clienteId) {
           resolve(qr);
         }
 
-        // Conectado com sucesso
         if (connection === 'open') {
           console.log('✅ WhatsApp conectado para cliente:', clienteId);
           connData.connected = true;
           
-          // Atualizar banco de dados
           await supabase
             .from('clientes')
             .update({ whatsapp_conectado: true })
             .eq('id', clienteId);
         }
 
-        // Conexão fechada
         if (connection === 'close') {
           const statusCode = lastDisconnect?.error?.output?.statusCode;
           console.log('⚠️ Conexão fechada. Status:', statusCode);
@@ -108,30 +95,24 @@ async function createWhatsAppConnection(clienteId) {
           if (!shouldReconnect) {
             console.log('🔐 Logout detectado - limpando sessão');
             
-            // Limpar arquivos de sessão
             if (fs.existsSync(authDir)) {
               fs.rmSync(authDir, { recursive: true, force: true });
             }
             
-            // Atualizar banco
             await supabase
               .from('clientes')
               .update({ whatsapp_conectado: false })
               .eq('id', clienteId);
           }
           
-          // Remover conexão do map
           connections.delete(clienteId);
         }
       });
 
-      // Evento: Mensagens recebidas
       sock.ev.on('messages.upsert', async ({ messages }) => {
         console.log('📨 Mensagem recebida:', messages.length);
-        // TODO: Salvar no banco de dados
       });
 
-      // Timeout de segurança (caso não gere QR em 20s)
       setTimeout(() => {
         if (!resolved) {
           console.log('⏱️ Timeout ao gerar QR code');
@@ -150,7 +131,6 @@ async function createWhatsAppConnection(clienteId) {
   });
 }
 
-// Endpoint: Health Check
 app.get('/health', (req, res) => {
   res.json({
     status: 'online',
@@ -160,7 +140,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Endpoint: Gerar QR Code
 app.post('/generate-qr', async (req, res) => {
   const { clienteId } = req.body;
   
@@ -178,7 +157,6 @@ app.post('/generate-qr', async (req, res) => {
   }
 });
 
-// Endpoint: Desconectar
 app.post('/disconnect', async (req, res) => {
   const { clienteId } = req.body;
   
@@ -193,7 +171,6 @@ app.post('/disconnect', async (req, res) => {
       await conn.sock.logout();
     }
     
-    // Limpar arquivos de sessão
     const authDir = path.join(__dirname, 'auth_sessions', clienteId);
     if (fs.existsSync(authDir)) {
       fs.rmSync(authDir, { recursive: true, force: true });
@@ -213,7 +190,6 @@ app.post('/disconnect', async (req, res) => {
   }
 });
 
-// Iniciar servidor
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Servidor MBNG WhatsApp rodando na porta ${PORT}`);
