@@ -106,21 +106,32 @@ async function connectToWhatsApp(clienteId) {
       // CONECTADO COM SUCESSO
       // ====================================
       if (connection === 'open') {
-        console.log(`[${clienteId}] ✅ Conectado com sucesso!`);
+        console.log(`[${clienteId}] ✅ WhatsApp CONECTADO COM SUCESSO!`);
+        console.log(`[${clienteId}] 📝 Atualizando banco de dados...`);
+        
         instance.state = 'open';
         instance.qrCode = null;
         instance.retryCount = 0;
 
-        // Atualizar Supabase
-        await supabase
-          .from('clientes')
-          .update({ 
-            whatsapp_conectado: true,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', clienteId);
+        // Atualizar Supabase com tratamento de erro
+        try {
+          const { data, error } = await supabase
+            .from('clientes')
+            .update({ 
+              whatsapp_conectado: true,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', clienteId)
+            .select();
 
-        console.log(`[${clienteId}] ✅ Status atualizado no banco`);
+          if (error) {
+            console.error(`[${clienteId}] ❌ ERRO ao atualizar banco:`, error);
+          } else {
+            console.log(`[${clienteId}] ✅ STATUS ATUALIZADO NO BANCO:`, data);
+          }
+        } catch (err) {
+          console.error(`[${clienteId}] ❌ EXCEÇÃO ao atualizar banco:`, err);
+        }
       }
 
       // ====================================
@@ -143,21 +154,31 @@ async function connectToWhatsApp(clienteId) {
         const shouldRetry = instance.retryCount < 5;
 
         if (statusCode === DisconnectReason.loggedOut) {
-          console.log(`[${clienteId}] 🔐 Logout - Limpando sessão`);
+          console.log(`[${clienteId}] 🔐 Logout detectado - Limpando sessão`);
           
           // Limpar sessão
           if (fs.existsSync(authDir)) {
             fs.rmSync(authDir, { recursive: true, force: true });
           }
           
-          // Atualizar banco
-          await supabase
-            .from('clientes')
-            .update({ 
-              whatsapp_conectado: false,
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', clienteId);
+          // Atualizar banco com tratamento de erro
+          try {
+            const { error } = await supabase
+              .from('clientes')
+              .update({ 
+                whatsapp_conectado: false,
+                updated_at: new Date().toISOString()
+              })
+              .eq('id', clienteId);
+            
+            if (error) {
+              console.error(`[${clienteId}] ❌ Erro ao marcar desconectado:`, error);
+            } else {
+              console.log(`[${clienteId}] ✅ Status desconectado atualizado no banco`);
+            }
+          } catch (err) {
+            console.error(`[${clienteId}] ❌ Exceção ao atualizar banco:`, err);
+          }
           
           // Remover instância
           instances.delete(clienteId);
@@ -198,29 +219,29 @@ async function connectToWhatsApp(clienteId) {
         const messageInfo = {
           from: msg.key.remoteJid,
           messageId: msg.key.id,
-          timestamp: msg.messageTimestamp,
-          isFromMe: msg.key.fromMe
+          timestamp: new Date(msg.messageTimestamp * 1000).toISOString(),
+          content: msg.message.conversation || msg.message.extendedTextMessage?.text || '',
+          type: Object.keys(msg.message)[0]
         };
-        
+
         console.log(`[${clienteId}] 💬 Mensagem:`, messageInfo);
         
         // TODO: Salvar mensagem no Supabase
-        // Implementar conforme necessário
+        // await supabase.from('whatsapp_mensagens').insert({...})
       }
     });
 
-    console.log(`[${clienteId}] ✅ Instância criada com sucesso`);
-    return instance;
+    return sock;
 
   } catch (error) {
-    console.error(`[${clienteId}] ❌ Erro ao criar instância:`, error);
+    console.error(`[${clienteId}] ❌ Erro crítico:`, error);
     instances.delete(clienteId);
     throw error;
   }
 }
 
 // ====================================
-// ENDPOINTS
+// ROTAS DA API
 // ====================================
 
 /**
@@ -277,50 +298,55 @@ app.post('/generate-qr', async (req, res) => {
       }
       
       // Aguardar QR ser gerado (timeout 15s)
-      const maxWait = 15000;
-      const startTime = Date.now();
+      let attempts = 0;
+      const maxAttempts = 30; // 30 * 500ms = 15s
       
-      while (Date.now() - startTime < maxWait) {
+      while (!instance.qrCode && attempts < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, 500));
         instance = instances.get(clienteId);
+        attempts++;
+        
         if (instance?.qrCode) {
-          console.log(`[${clienteId}] 📱 QR gerado (após ${Date.now() - startTime}ms)`);
+          console.log(`[${clienteId}] ✅ QR gerado após ${attempts * 500}ms`);
           return res.json({ qr: instance.qrCode });
         }
-        await new Promise(resolve => setTimeout(resolve, 500));
       }
       
-      throw new Error('Timeout aguardando QR code');
+      // Timeout
+      console.log(`[${clienteId}] ⏱️ Timeout aguardando QR`);
+      return res.status(408).json({ error: 'Timeout aguardando QR Code' });
     }
-
+    
     // Criar nova instância
     console.log(`[${clienteId}] 🆕 Criando nova instância`);
-    instance = await connectToWhatsApp(clienteId);
+    await connectToWhatsApp(clienteId);
     
-    // Aguardar QR ser gerado (timeout 15s)
-    const maxWait = 15000;
-    const startTime = Date.now();
+    // Aguardar QR
+    let attempts = 0;
+    const maxAttempts = 30;
     
-    while (Date.now() - startTime < maxWait) {
-      instance = instances.get(clienteId);
-      if (instance?.qrCode) {
-        console.log(`[${clienteId}] 📱 QR gerado (após ${Date.now() - startTime}ms)`);
-        return res.json({ qr: instance.qrCode });
-      }
+    while (attempts < maxAttempts) {
       await new Promise(resolve => setTimeout(resolve, 500));
+      const inst = instances.get(clienteId);
+      attempts++;
+      
+      if (inst?.qrCode) {
+        console.log(`[${clienteId}] ✅ QR gerado após ${attempts * 500}ms`);
+        return res.json({ qr: inst.qrCode });
+      }
     }
     
-    throw new Error('Timeout aguardando QR code');
+    console.log(`[${clienteId}] ⏱️ Timeout criando nova instância`);
+    return res.status(408).json({ error: 'Timeout ao gerar QR Code' });
     
   } catch (error) {
     console.error(`[${clienteId}] ❌ Erro:`, error);
-    res.status(500).json({ 
-      error: error.message || 'Erro ao gerar QR code' 
-    });
+    return res.status(500).json({ error: error.message });
   }
 });
 
 /**
- * Desconectar
+ * Desconectar (Logout)
  */
 app.post('/disconnect', async (req, res) => {
   const { clienteId } = req.body;
@@ -334,21 +360,22 @@ app.post('/disconnect', async (req, res) => {
   try {
     const instance = instances.get(clienteId);
     
-    if (instance?.sock) {
-      console.log(`[${clienteId}] 🔐 Fazendo logout...`);
+    if (!instance) {
+      return res.json({ success: true, message: 'Nenhuma instância ativa' });
+    }
+
+    // Fazer logout
+    if (instance.sock) {
       await instance.sock.logout();
     }
-    
+
     // Limpar sessão
     const authDir = path.join(__dirname, 'auth_sessions', clienteId);
     if (fs.existsSync(authDir)) {
       fs.rmSync(authDir, { recursive: true, force: true });
       console.log(`[${clienteId}] 🗑️ Sessão removida`);
     }
-    
-    // Remover instância
-    instances.delete(clienteId);
-    
+
     // Atualizar banco
     await supabase
       .from('clientes')
@@ -357,69 +384,85 @@ app.post('/disconnect', async (req, res) => {
         updated_at: new Date().toISOString()
       })
       .eq('id', clienteId);
+
+    // Remover instância
+    instances.delete(clienteId);
     
     console.log(`[${clienteId}] ✅ Desconectado com sucesso`);
-    res.json({ success: true });
+    return res.json({ success: true, message: 'Desconectado' });
     
   } catch (error) {
     console.error(`[${clienteId}] ❌ Erro ao desconectar:`, error);
-    res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: error.message });
   }
 });
 
 /**
- * Status da Conexão
+ * Verificar estado da conexão
  */
 app.get('/connection-state/:clienteId', (req, res) => {
   const { clienteId } = req.params;
+  
   const instance = instances.get(clienteId);
   
   if (!instance) {
     return res.json({
-      clienteId,
-      state: 'disconnected',
-      connected: false
+      connected: false,
+      state: 'not_found',
+      message: 'Nenhuma instância ativa'
     });
   }
-  
-  res.json({
-    clienteId,
-    state: instance.state,
+
+  return res.json({
     connected: instance.state === 'open',
+    state: instance.state,
     hasQR: !!instance.qrCode
   });
 });
 
 // ====================================
-// INICIALIZAÇÃO
+// INICIAR SERVIDOR
 // ====================================
 
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, '0.0.0.0', () => {
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
   console.log('');
-  console.log('🚀 =======================================');
-  console.log('🚀 MBNG WhatsApp Server (Evolution API)');
-  console.log('🚀 =======================================');
-  console.log(`🚀 Porta: ${PORT}`);
-  console.log('🚀 Endpoints:');
-  console.log('🚀   GET  /health');
-  console.log('🚀   POST /generate-qr');
-  console.log('🚀   POST /disconnect');
-  console.log('🚀   GET  /connection-state/:clienteId');
-  console.log('🚀 =======================================');
+  console.log('╔══════════════════════════════════════════╗');
+  console.log('║   🚀 MBNG WhatsApp Server ONLINE        ║');
+  console.log('╚══════════════════════════════════════════╝');
+  console.log('');
+  console.log(`📡 Porta: ${PORT}`);
+  console.log(`🔗 Supabase: ${SUPABASE_URL}`);
+  console.log(`⏰ Iniciado em: ${new Date().toISOString()}`);
+  console.log('');
+  console.log('🎯 Endpoints disponíveis:');
+  console.log('  GET  /health');
+  console.log('  POST /generate-qr');
+  console.log('  POST /disconnect');
+  console.log('  GET  /connection-state/:clienteId');
   console.log('');
 });
 
-// Graceful shutdown
+// ====================================
+// GRACEFUL SHUTDOWN
+// ====================================
+
 process.on('SIGINT', async () => {
-  console.log('\n⚠️ Encerrando servidor...');
+  console.log('');
+  console.log('⚠️  Encerrando servidor...');
   
+  // Desconectar todas as instâncias
   for (const [clienteId, instance] of instances.entries()) {
-    if (instance?.sock) {
-      console.log(`[${clienteId}] Fechando conexão...`);
-      instance.sock.end();
+    try {
+      console.log(`[${clienteId}] 👋 Desconectando...`);
+      if (instance.sock) {
+        await instance.sock.end();
+      }
+    } catch (error) {
+      console.error(`[${clienteId}] ❌ Erro ao encerrar:`, error);
     }
   }
   
+  console.log('✅ Servidor encerrado');
   process.exit(0);
 });
