@@ -1,168 +1,116 @@
-const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys');
-const { createClient } = require('@supabase/supabase-js');
-const express = require('express');
-const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
+// WhatsApp Service - Coordenação Frontend (Evolution API inspired)
+import { supabase } from '@/integrations/supabase/client';
 
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-const SUPABASE_URL = process.env.SUPABASEURL;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASESERVICEROLEKEY;
-
-if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-  console.error('❌ SUPABASEURL e SUPABASESERVICEROLEKEY obrigatórios');
-  process.exit(1);
+interface WhatsAppConnectionState {
+  qr?: string;
+  connected: boolean;
+  polling?: boolean;
 }
 
-console.log('✅ Supabase configurado');
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-const activeConnections = new Map();
+class WhatsAppService {
+  private static instance: WhatsAppService;
+  private connections: Map<string, WhatsAppConnectionState> = new Map();
+  private pollIntervals: Map<string, NodeJS.Timeout> = new Map();
 
-// Diretório para auth state
-const AUTH_DIR = path.join(__dirname, 'auth_sessions');
-if (!fs.existsSync(AUTH_DIR)) {
-  fs.mkdirSync(AUTH_DIR, { recursive: true });
-}
+  private constructor() {}
 
-function getAuthPath(clienteId) {
-  return path.join(AUTH_DIR, clienteId);
-}
-
-async function createWhatsAppConnection(clienteId) {
-  console.log(`🔄 Iniciando conexão WhatsApp para cliente: ${clienteId}`);
-  
-  if (activeConnections.has(clienteId)) {
-    const existing = activeConnections.get(clienteId);
-    if (existing.qr) {
-      console.log('📱 QR já existe, retornando');
-      return existing.qr;
+  static getInstance(): WhatsAppService {
+    if (!WhatsAppService.instance) {
+      WhatsAppService.instance = new WhatsAppService();
     }
+    return WhatsAppService.instance;
   }
 
-  return new Promise(async (resolve, reject) => {
-    const timeout = setTimeout(() => {
-      console.log('⏱️ Timeout de 30s');
-      reject(new Error('Timeout ao gerar QR'));
-    }, 30000);
-
+  async checkServerHealth(serverUrl: string): Promise<{ online: boolean; error?: string; details?: any }> {
     try {
-      const authPath = getAuthPath(clienteId);
-      const { state, saveCreds } = await useMultiFileAuthState(authPath);
-
-      const sock = makeWASocket({
-        auth: state,
-        printQRInTerminal: false
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      
+      const response = await fetch(`${serverUrl}/health`, {
+        method: 'GET',
+        signal: controller.signal,
       });
 
-      activeConnections.set(clienteId, { sock, qr: null });
+      clearTimeout(timeoutId);
 
-      sock.ev.on('creds.update', saveCreds);
+      if (!response.ok) {
+        return { online: false, error: `Servidor retornou status ${response.status}` };
+      }
 
-      sock.ev.on('connection.update', async (update) => {
-        const { connection, qr, lastDisconnect } = update;
-
-        if (qr) {
-          console.log('📱 QR Code gerado');
-          const conn = activeConnections.get(clienteId);
-          if (conn) conn.qr = qr;
-          clearTimeout(timeout);
-          resolve(qr);
-        }
-
-        if (connection === 'open') {
-          console.log('✅ WhatsApp conectado');
-          await supabase
-            .from('clientes')
-            .update({ whatsapp_conectado: true })
-            .eq('id', clienteId);
-        }
-
-        if (connection === 'close') {
-          console.log('⚠️ Conexão fechada');
-          const shouldReconnect = 
-            lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-          
-          activeConnections.delete(clienteId);
-          
-          if (!shouldReconnect) {
-            await supabase
-              .from('clientes')
-              .update({ whatsapp_conectado: false })
-              .eq('id', clienteId);
-          }
-        }
-      });
-
-    } catch (err) {
-      clearTimeout(timeout);
-      console.error('❌ Erro:', err.message);
-      reject(err);
+      const data = await response.json();
+      return { online: true, details: data };
+      
+    } catch (error: any) {
+      if (error.name === 'AbortError') {
+        return { online: false, error: 'Timeout - aguarde 1 minuto e tente novamente' };
+      }
+      return { online: false, error: 'Não foi possível conectar' };
     }
-  });
+  }
+
+  async requestQRCode(clienteId: string, serverUrl: string): Promise<string> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
+    
+    const response = await fetch(`${serverUrl}/generate-qr`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clienteId }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) throw new Error(`Erro ${response.status}`);
+
+    const data = await response.json();
+    if (!data.qr) throw new Error('QR não retornado');
+
+    this.connections.set(clienteId, { qr: data.qr, connected: false });
+    return data.qr;
+  }
+
+  startPolling(clienteId: string, onConnected: () => void): void {
+    this.stopPolling(clienteId);
+
+    const interval = setInterval(async () => {
+      const { data } = await supabase
+        .from('clientes_safe')
+        .select('whatsapp_conectado')
+        .eq('id', clienteId)
+        .maybeSingle();
+
+      if (data?.whatsapp_conectado) {
+        this.stopPolling(clienteId);
+        const state = this.connections.get(clienteId);
+        if (state) state.connected = true;
+        onConnected();
+      }
+    }, 2000);
+
+    this.pollIntervals.set(clienteId, interval);
+  }
+
+  stopPolling(clienteId: string): void {
+    const interval = this.pollIntervals.get(clienteId);
+    if (interval) {
+      clearInterval(interval);
+      this.pollIntervals.delete(clienteId);
+    }
+  }
+
+  async disconnect(clienteId: string): Promise<void> {
+    this.stopPolling(clienteId);
+    this.connections.delete(clienteId);
+  }
+
+  isConnected(clienteId: string): boolean {
+    return this.connections.get(clienteId)?.connected || false;
+  }
+
+  getQRCode(clienteId: string): string | undefined {
+    return this.connections.get(clienteId)?.qr;
+  }
 }
 
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'online',
-    activeConnections: activeConnections.size,
-    timestamp: new Date().toISOString()
-  });
-});
-
-app.post('/generate-qr', async (req, res) => {
-  const { clienteId } = req.body;
-  
-  if (!clienteId) {
-    return res.status(400).json({ error: 'clienteId obrigatório' });
-  }
-
-  try {
-    console.log(`🎯 Gerando QR para: ${clienteId}`);
-    const qr = await createWhatsAppConnection(clienteId);
-    res.json({ qr });
-  } catch (err) {
-    console.error('❌ Erro:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/disconnect', async (req, res) => {
-  const { clienteId } = req.body;
-  
-  if (!clienteId) {
-    return res.status(400).json({ error: 'clienteId obrigatório' });
-  }
-
-  try {
-    const connection = activeConnections.get(clienteId);
-    if (connection?.sock) {
-      await connection.sock.logout();
-    }
-    
-    activeConnections.delete(clienteId);
-    
-    const authPath = getAuthPath(clienteId);
-    if (fs.existsSync(authPath)) {
-      fs.rmSync(authPath, { recursive: true, force: true });
-    }
-    
-    await supabase
-      .from('clientes')
-      .update({ whatsapp_conectado: false })
-      .eq('id', clienteId);
-    
-    res.json({ success: true });
-  } catch (err) {
-    console.error('❌ Erro ao desconectar:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Servidor rodando na porta ${PORT}`);
-  console.log('📡 Endpoints: /health, /generate-qr, /disconnect');
-});
+export const whatsappService = WhatsAppService.getInstance();
