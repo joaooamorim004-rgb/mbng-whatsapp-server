@@ -11,17 +11,50 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const SUPABASE_URL = process.env.SUPABASEURL;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASESERVICEROLEKEY;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-  console.error('❌ SUPABASEURL e SUPABASESERVICEROLEKEY são obrigatórias');
+  console.error('❌ SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY são obrigatórias');
   process.exit(1);
 }
 
 console.log('✅ Supabase configurado');
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 const logger = pino({ level: 'silent' });
+
+// ====================================
+// INICIAR SERVIDOR IMEDIATAMENTE
+// ====================================
+const PORT = process.env.PORT || 3000;
+
+console.log('');
+console.log('🚀 Iniciando MBNG WhatsApp Server...');
+console.log(`🚀 Porta: ${PORT}`);
+
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log('');
+  console.log('╔══════════════════════════════════════════╗');
+  console.log('║   🎉 MBNG WhatsApp Server ONLINE!       ║');
+  console.log('╚══════════════════════════════════════════╝');
+  console.log('');
+  console.log(`📡 Porta: ${PORT}`);
+  console.log(`🔗 Supabase: ${SUPABASE_URL}`);
+  console.log(`⏰ Iniciado em: ${new Date().toISOString()}`);
+  console.log('');
+  console.log('🎯 Endpoints disponíveis:');
+  console.log('  GET  /health');
+  console.log('  POST /generate-qr');
+  console.log('  POST /disconnect');
+  console.log('  GET  /connection-state/:clienteId');
+  console.log('');
+  console.log('✅ Pronto para receber requisições!');
+});
+
+server.on('error', (error) => {
+  console.error('❌ ERRO AO INICIAR SERVIDOR:', error);
+  process.exit(1);
+});
 
 // Gerenciamento de instâncias (Evolution API pattern)
 const instances = new Map();
@@ -418,29 +451,6 @@ app.get('/connection-state/:clienteId', (req, res) => {
     state: instance.state,
     hasQR: !!instance.qrCode
   });
-});
-
-// ====================================
-// INICIAR SERVIDOR
-// ====================================
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log('');
-  console.log('╔══════════════════════════════════════════╗');
-  console.log('║   🚀 MBNG WhatsApp Server ONLINE        ║');
-  console.log('╚══════════════════════════════════════════╝');
-  console.log('');
-  console.log(`📡 Porta: ${PORT}`);
-  console.log(`🔗 Supabase: ${SUPABASE_URL}`);
-  console.log(`⏰ Iniciado em: ${new Date().toISOString()}`);
-  console.log('');
-  console.log('🎯 Endpoints disponíveis:');
-  console.log('  GET  /health');
-  console.log('  POST /generate-qr');
-  console.log('  POST /disconnect');
-  console.log('  GET  /connection-state/:clienteId');
-  console.log('');
 });
 
 // ====================================
